@@ -21,7 +21,7 @@ The message includes the native operation and HRESULT; the optional
 `Operation` and `NativeCode` properties can still be null. Always preserve the
 message, not only optional metadata. Missing or failed retrieval cannot
 replace the creation error; success and non-policy failures are not queried.
-MXC does not mutate the request or retry a policy refusal. Returned
+By default, MXC does not change the effective request or retry a policy refusal. Returned
 constraints are non-exhaustive and can be unknown or incomplete; the prose
 is not a supported parsing contract. See
 [detailed policy errors](../../docs/development/guides/process-container-adding-os-features.md#detailed-policy-errors).
@@ -34,6 +34,34 @@ Revise the corresponding typed V1 request properties rather than only removing
 a capability-list entry. Unknown or incomplete details do not supply guessed
 edits. See
 [request guidance](../../docs/development/guides/process-container-adding-os-features.md#guidance-in-mxc-request-terms).
+
+### Opt-in restrictive creation
+
+Set `MutatePolicy = true` in `RunOptions` / `SpawnOptions` when calling
+`MxcContainer.Run[Async]` or `Spawn[Async]` to authorize safe restrictions
+after native Windows ProcessContainer creation is refused. The field defaults
+to `false`. Results remain the ordinary `ExecutionResult` / `MxcProcess`;
+mutation descriptions are plain text in `Warnings`. Async cancellation behavior
+is unchanged, and cancellation tokens remain the final parameter.
+
+```csharp
+var result = MxcContainer.Run(request, new RunOptions { MutatePolicy = true });
+```
+
+The caller's request object is not edited. MXC repairs a private copy before
+launching the workload once, without selecting another backend or falling
+back to AppContainer. Unknown, incomplete or unsafe constraints still reject
+creation and retain any attempted-change text. PTY and container lifecycle
+operations have no mutation option. Authorization is not read from request JSON
+and does not enable experimental backends. Missing dedicated native exports
+reject only opted-in calls, never silently use strict creation. See the
+[supported repairs and limits](../../docs/development/guides/process-container-adding-os-features.md#opt-in-creation-policy-mutation).
+
+Opted-in calls can automatically reuse successful restrictive corrections for
+the same requested policy and caller. This is a bounded in-process cache inside
+MXC's native retry loop, not a caller-owned context or an extra option.
+Windows validates every creation again; warnings identify reused changes.
+Strict creation does not use the cache, and no state is saved to disk.
 
 ## Run to completion
 

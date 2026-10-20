@@ -28,6 +28,20 @@ Read the terminal output concurrently rather than only after waiting. On macOS
 a workload cannot exit while its terminal output is still unread, so a caller
 that waits first without reading can block indefinitely.
 
+For explicit restrictive creation-policy correction on native Windows
+ProcessContainer, set `mutatePolicy: true` in `RunOptions` or `SpawnOptions`
+when calling `run` or `spawn`. Omitted or `false` stays strict. Results retain
+their ordinary types, with descriptions in existing warnings. Opted-in creation
+never switches backend/tier, edits the caller's object or file, or replays a
+workload. Unknown or unsafe corrections remain errors. PTY and container
+lifecycle options have no mutation control. See
+[supported corrections and limits](../../../development/guides/process-container-adding-os-features.md#opt-in-creation-policy-mutation).
+
+Opted-in creation can reuse successful restrictive corrections for matching
+requested policy and caller identity within the process. Each creation is
+checked again; warnings identify reused corrections. Strict creation does not
+apply cached restrictions.
+
 ## Discovery and validation
 
 | Operation | Use it to |
@@ -150,11 +164,14 @@ export async function requestTelemetryConsent(presenter: TelemetryConsentPresent
 ## `@microsoft/mxc-sdk/v1::run`
 
 Run a container request asynchronously and capture its output.
+With `options.mutatePolicy` enabled, `ExecutionResult.warnings` also describes
+restrictive creation-policy corrections; stdout and stderr remain workload
+output. An older native library without mutation support rejects opted-in
+calls rather than silently using strict creation.
 
 ```typescript
 export async function run(request: ContainerRequest, options: RunOptions = {}): Promise<ExecutionResult>;
 ```
-
 
 ## `@microsoft/mxc-sdk/v1::runInContainer`
 
@@ -170,11 +187,13 @@ export async function runInContainer<C extends PipedExecuteBackend>(containerId:
 ## `@microsoft/mxc-sdk/v1::spawn`
 
 Create a container request and asynchronously return its live process.
+With `options.mutatePolicy` enabled, read restrictive correction descriptions
+through `MxcProcess.warnings`. Unsupported backends or unsafe corrections
+remain errors, and the workload is launched once.
 
 ```typescript
 export async function spawn(request: ContainerRequest, options: SpawnOptions = {}): Promise<MxcProcess>;
 ```
-
 
 ## `@microsoft/mxc-sdk/v1::spawnInContainer`
 

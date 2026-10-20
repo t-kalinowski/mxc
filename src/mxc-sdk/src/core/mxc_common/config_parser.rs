@@ -1621,6 +1621,7 @@ fn normalize_common_request_ir(
         windows_sandbox,
         hyperlight,
         experimental_enabled: false,
+        policy_mutation_enabled: false,
         dry_run: false,
     })
 }
