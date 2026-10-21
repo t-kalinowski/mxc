@@ -10,7 +10,6 @@ use std::io::{Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::{HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -26,11 +25,11 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, DeleteFileW, FileAttributeTagInfo, FileIdInfo, FlushFileBuffers,
-    GetDriveTypeW, GetFileInformationByHandleEx, GetFileSizeEx, GetVolumeInformationW,
-    RemoveDirectoryW, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_MODE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    GetDriveTypeW, GetFileInformationByHandleEx, GetVolumeInformationW, RemoveDirectoryW,
+    CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_MODE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::SystemServices::FILE_PERSISTENT_ACLS;
@@ -40,7 +39,6 @@ use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, KF_F
 const DIRECTORY_PREFIX: &str = "mxc-plm-elevated-";
 const PROFILE_FILE: &str = "embedded.wprp";
 const TRACE_FILE: &str = "trace.etl";
-const FILTERED_TRACE_FILE: &str = "filtered.etl";
 const RECOVERY_STATE_PARENT: &str = "Microsoft";
 const RECOVERY_STATE_COMPONENTS: [&str; 2] = ["MXC", "PLM"];
 const RECOVERY_MARKER_FILE: &str = "active.marker";
@@ -55,10 +53,8 @@ pub struct SecureScratch {
     directory: PathBuf,
     profile: PathBuf,
     trace: PathBuf,
-    filtered_trace: PathBuf,
     _ancestor_handles: Vec<OwnedHandle>,
     directory_handle: Option<OwnedHandle>,
-    trace_opened: AtomicBool,
 }
 
 impl fmt::Debug for SecureScratch {
@@ -68,7 +64,6 @@ impl fmt::Debug for SecureScratch {
             .field("directory", &self.directory)
             .field("profile", &self.profile)
             .field("trace", &self.trace)
-            .field("filtered_trace", &self.filtered_trace)
             .finish_non_exhaustive()
     }
 }
@@ -134,11 +129,9 @@ impl SecureScratch {
                     return Ok(Self {
                         profile: directory.join(PROFILE_FILE),
                         trace: directory.join(TRACE_FILE),
-                        filtered_trace: directory.join(FILTERED_TRACE_FILE),
                         directory,
                         _ancestor_handles: ancestor_handles,
                         directory_handle: Some(directory_handle),
-                        trace_opened: AtomicBool::new(false),
                     });
                 }
                 Err(error)
@@ -166,11 +159,6 @@ impl SecureScratch {
     /// Returns the path WPR must use for the ETL output.
     pub fn trace_path(&self) -> &Path {
         &self.trace
-    }
-
-    /// Returns the protected destination for the process-scoped ETL.
-    pub fn filtered_trace_path(&self) -> &Path {
-        &self.filtered_trace
     }
 
     /// Creates, flushes, verifies, and seals the embedded WPR profile.
@@ -235,69 +223,9 @@ impl SecureScratch {
         })
     }
 
-    /// Opens the process-scoped ETL once, hardens it, and returns its exact size.
-    pub fn open_filtered_trace(&self) -> Result<(std::fs::File, u64)> {
-        self.open_trace_at(&self.filtered_trace, "filtered PLM trace")
-    }
-
-    fn open_trace_at(&self, path: &Path, description: &str) -> Result<(std::fs::File, u64)> {
-        if self
-            .trace_opened
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            bail!("secure PLM trace has already been opened");
-        }
-
-        let result = self.open_trace_inner(path, description);
-        if result.is_err() {
-            self.trace_opened.store(false, Ordering::Release);
-        }
-        result
-    }
-
-    fn open_trace_inner(&self, path: &Path, description: &str) -> Result<(std::fs::File, u64)> {
-        let access = FILE_GENERIC_READ.0
-            | READ_CONTROL.0
-            | WRITE_DAC.0
-            | WRITE_OWNER.0
-            | FILE_READ_ATTRIBUTES.0;
-        let handle = open_handle(path, access, PROTECTOR_SHARE, FILE_FLAG_OPEN_REPARSE_POINT)
-            .with_context(|| format!("failed to open secure {description} {}", path.display()))?;
-        verify_file_kind(handle.0, false)
-            .with_context(|| format!("{description} has an unsafe file type"))?;
-
-        let security = OwnedSecurityDescriptor::from_sddl(PROTECTED_SDDL)?;
-        // SAFETY: `handle` is valid and the parsed descriptor remains alive
-        // through SetKernelObjectSecurity.
-        unsafe {
-            SetKernelObjectSecurity(
-                handle.0,
-                DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
-                security.as_ptr(),
-            )
-        }
-        .with_context(|| format!("failed to harden {description} security"))?;
-
-        let mut size = 0i64;
-        // SAFETY: `handle` is valid and `size` is a correctly sized out-param.
-        unsafe { GetFileSizeEx(handle.0, &mut size) }
-            .with_context(|| format!("failed to read {description} size"))?;
-        let size = u64::try_from(size)
-            .with_context(|| format!("{description} reported a negative size"))?;
-
-        // Transfer ownership from the RAII handle to File.
-        let raw = handle.into_raw();
-        // SAFETY: `raw` is a valid owned file handle and is no longer managed
-        // by OwnedHandle.
-        let file = unsafe { std::fs::File::from_raw_handle(raw.0) };
-        Ok((file, size))
-    }
-
     fn cleanup(&mut self) {
         delete_known_leaf(&self.profile);
         delete_known_leaf(&self.trace);
-        delete_known_leaf(&self.filtered_trace);
         self.directory_handle.take();
         let wide = wide_path(&self.directory);
         // SAFETY: `wide` is a NUL-terminated path to the one known directory.
