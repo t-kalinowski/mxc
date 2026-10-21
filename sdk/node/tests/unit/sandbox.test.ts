@@ -1,18 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { createConfigFromRequest } from '../../src/v1/container.js';
-import { resolveExecutableAndArgs } from '../../src/helper.js';
+import { resolveExecutableAndArgs, resolveBinaryAndCommonArgs } from '../../src/helper.js';
 import {
   _resetPlatformSupportCache,
+  _setProbeRunner,
   _setBwrapVersionRunner,
   _setLxcAvailabilityProbe,
+  _setWindowsBackendDetectors,
+  _setDarwinBackendsReader,
+  getPlatformSupport,
 } from '../../src/v1/platform.js';
 import { ContainerConfig, ContainerRequest, SandboxingMethod } from '../../src/v1/types.js';
 import { MxcError } from '../../src/v1/errors.js';
-import { platformSkip } from './test-helpers.js';
 
 describe('ContainerRequest config mapping', () => {
   const defaultRequest: ContainerRequest = { command: '' };
@@ -255,10 +258,26 @@ describe('IsolationSession one-shot request serialization', () => {
   });
 });
 
-describe('resolveExecutableAndArgs (containment validation)', { skip: platformSkip }, () => {
-  // Use the running node binary as a stand-in executable so the helper does
-  // not try to discover wxc-exec on disk. The helper does not actually exec
-  // anything; it just builds the path + args.
+describe('resolveExecutableAndArgs (containment validation)', () => {
+  beforeEach(() => {
+    _setWindowsBackendDetectors(() => [], () => false);
+    _setProbeRunner(() => JSON.stringify({ tier: 'base-container', probes: { baseContainerApiPresent: true } }));
+    _setLxcAvailabilityProbe(() => true);
+    _setBwrapVersionRunner(() => ({ kind: 'failed', status: null, detail: 'mocked unavailable' }));
+    _setDarwinBackendsReader(() => [{ backend: 'seatbelt', capabilities: [], warnings: [] }]);
+    _resetPlatformSupportCache();
+  });
+
+  afterEach(() => {
+    _setWindowsBackendDetectors();
+    _setProbeRunner(null);
+    _setLxcAvailabilityProbe(null);
+    _setBwrapVersionRunner(null);
+    _setDarwinBackendsReader(null);
+    _resetPlatformSupportCache();
+  });
+
+  // Detector stubs prevent real probes; Node is only a path-validation stand-in.
   const fakeExe = process.execPath;
 
   function makeConfig(containment: string): ContainerConfig {
@@ -376,6 +395,43 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     );
   });
 
+  it('rejects launch preparation when Windows reports no usable backend', { skip: process.platform !== 'win32' }, () => {
+    _setWindowsBackendDetectors(() => [], () => false);
+    _setProbeRunner(() => JSON.stringify({ probes: { baseContainerApiPresent: false } }));
+    _resetPlatformSupportCache();
+    try {
+      assert.throws(
+        () => resolveExecutableAndArgs(makeConfig('processcontainer')),
+        /requires PSEC/,
+      );
+    } finally {
+      _setWindowsBackendDetectors();
+      _setProbeRunner(null);
+      _resetPlatformSupportCache();
+    }
+  });
+
+  it('probes the explicit Windows executor independently of cached default discovery', { skip: process.platform !== 'win32' }, () => {
+    const probedPaths: Array<string | undefined> = [];
+    _setProbeRunner((executablePath) => {
+      probedPaths.push(executablePath);
+      return JSON.stringify({ probes: { baseContainerApiPresent: executablePath === fakeExe } });
+    });
+    const defaultSupport = getPlatformSupport();
+    assert.strictEqual(defaultSupport.isSupported, false);
+    const config = makeConfig('processcontainer');
+    assert.strictEqual(
+      resolveExecutableAndArgs(config, { executablePath: fakeExe }).executablePath,
+      fakeExe,
+    );
+    assert.strictEqual(
+      resolveBinaryAndCommonArgs(JSON.stringify(config), { executablePath: fakeExe }).executablePath,
+      fakeExe,
+    );
+    assert.deepStrictEqual(probedPaths, [undefined, fakeExe, fakeExe]);
+    assert.strictEqual(getPlatformSupport(), defaultSupport);
+  });
+
   // Legacy wire-value aliases (PR #268 deprecation window). Historical v0
   // contracts accept these via serde aliases; the SDK validator must mirror
   // each exact contract so legacy configs reach wxc-exec while v1 rejects the
@@ -388,9 +444,18 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         this.skip('processcontainer is Windows-only');
         return;
       }
-      assert.doesNotThrow(() =>
-        resolveExecutableAndArgs(makeConfig('appcontainer'), { executablePath: fakeExe }),
+      _setProbeRunner(() =>
+        JSON.stringify({ tier: 'base-container', probes: { baseContainerApiPresent: true } }),
       );
+      _resetPlatformSupportCache();
+      try {
+        assert.doesNotThrow(() =>
+          resolveExecutableAndArgs(makeConfig('appcontainer'), { executablePath: fakeExe }),
+        );
+      } finally {
+        _setProbeRunner(null);
+        _resetPlatformSupportCache();
+      }
     });
 
     it('should reject "appcontainer" on non-Windows hosts with the canonical error', function (this: { skip: (reason?: string) => void }) {

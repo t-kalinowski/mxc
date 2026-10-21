@@ -11,10 +11,11 @@ import {
   ContainmentBackend,
   ContainmentTypes,
   ExperimentalBackends,
+  type PlatformSupport,
   LegacyContainmentAliases,
   legacyConfigAliasUnsupportedReason,
 } from './v1/types.js';
-import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './v1/platform.js';
+import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupportForExecutable } from './v1/platform.js';
 import { diagLog } from './diagnostic.js';
 import { mxcErrorFromCode } from './v1/errors.js';
 
@@ -107,23 +108,28 @@ export function makeLogFilePath(dir: string): string {
  * MXC request envelope (one-shot or state-aware). Performs platform support
  * and binary-presence checks; does not validate envelope contents — callers
  * apply request-specific validation before delegating to this helper.
+ * Windows discovery probes a supplied executor directly without changing the
+ * cached default-executor result.
  */
 export function resolveBinaryAndCommonArgs(
   envelopeJson: string,
   options: SandboxSpawnOptions,
+  checkedSupport?: PlatformSupport,
 ): { executablePath: string; args: string[] } {
-  const platformSupport = getPlatformSupport();
-  if (!platformSupport.isSupported && !options.skipPlatformCheck) {
-    throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
+  if (options.executablePath && !fs.existsSync(options.executablePath)) {
+    throw new Error(`File not found: ${options.executablePath}`);
+  }
+  if (!options.skipPlatformCheck) {
+    const support = checkedSupport ?? getPlatformSupportForExecutable(options.executablePath);
+    if (!support.isSupported) {
+      throw new Error(`MXC is not supported on this platform: ${support.reason}`);
+    }
   }
 
   const platform = os.platform();
   let executablePath: string;
 
   if (options.executablePath) {
-    if (!fs.existsSync(options.executablePath)) {
-      throw new Error(`File not found: ${options.executablePath}`);
-    }
     executablePath = options.executablePath;
   } else if (platform === 'linux') {
     const p = findLxcExecutable();
@@ -212,10 +218,15 @@ export function resolveExecutableAndArgs(
     );
   }
 
-  const platformSupport = getPlatformSupport();
+  if (options.executablePath && !fs.existsSync(options.executablePath)) {
+    throw new Error(`File not found: ${options.executablePath}`);
+  }
+  const platformSupport = options.skipPlatformCheck
+    ? undefined
+    : getPlatformSupportForExecutable(options.executablePath);
   const isExperimental = !!effectiveContainment &&
     (ExperimentalBackends as readonly string[]).includes(effectiveContainment);
-  if (!platformSupport.isSupported && !isExperimental && !options.skipPlatformCheck) {
+  if (platformSupport && !platformSupport.isSupported && !isExperimental) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
@@ -227,7 +238,7 @@ export function resolveExecutableAndArgs(
   }
 
   // Validate containment against platform
-  if (effectiveContainment && !options.skipPlatformCheck) {
+  if (effectiveContainment && platformSupport) {
     // Abstract intents (process, microvm) are resolved by the native binary
     // at run time, so the SDK accepts them without checking against the
     // host's concrete backend list.
@@ -246,7 +257,7 @@ export function resolveExecutableAndArgs(
     }
   }
 
-  return resolveBinaryAndCommonArgs(JSON.stringify(config), options);
+  return resolveBinaryAndCommonArgs(JSON.stringify(config), options, platformSupport);
 }
 
 /**
