@@ -1129,6 +1129,28 @@ function Phase-T1DenyForced {
 function Phase-UiMitigationMatrix {
     Section 'Phase 4b: UI mitigation behavior matrix (host baseline tier)'
 
+    # Exercise a native image that initializes Windows UI libraries, including
+    # when the test runner starts from a service window station.
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $nativeConfig = [ordered]@{
+        version = '0.7.0-alpha'
+        containerId = 'MxcWinPC-native-startup'
+        process = @{ commandLine = "`"$powershell`" -NoLogo -NoProfile -NonInteractive -Command `"Write-Output 'MXC_UI_STARTUP_READY'`"" }
+        filesystem = @{ readonlyPaths = @($env:SystemRoot) }
+        ui = @{ disable = $false; clipboard = 'none'; injection = $false }
+        processContainer = @{
+            capabilities = @('registryRead')
+            ui = @{ isolation = 'desktop'; desktopSystemControl = $false; systemSettings = 'none'; ime = $false }
+        }
+    }
+    $nativeConfigPath = Join-Path $ScratchRoot 'configs\ui-native-startup.json'
+    $nativeConfig | ConvertTo-Json -Depth 10 | Out-File -LiteralPath $nativeConfigPath -Encoding utf8
+    $nativeLog = Join-Path $ScratchRoot 'logs\ui-native-startup.log'
+    $native = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $nativeConfigPath -LogPath $nativeLog
+    Record-Result -Phase 'P4b' -Name 'desktop-enabled native process initializes Windows libraries' `
+        -Pass ($native.ExitCode -eq 0 -and $native.Stdout.Trim() -eq 'MXC_UI_STARTUP_READY') `
+        -Detail "exit=$($native.ExitCode); stdout=$($native.Stdout); stderr=$($native.Stderr)"
+
     $rw = Join-Path $ScratchRoot 'rw'
 
     # ---------------- Scenario A: maximal UILIMIT bits -----------------

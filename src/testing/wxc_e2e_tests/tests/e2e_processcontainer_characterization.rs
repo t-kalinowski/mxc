@@ -281,3 +281,34 @@ fn processcontainer_honors_explicit_process_cwd() {
         result.combined_output()
     );
 }
+
+/// Desktop-enabled targets must load Windows libraries from service launches too.
+#[test]
+fn processcontainer_initializes_windows_libraries_with_desktop_access() {
+    if !ready() {
+        return;
+    }
+    let system_root = std::env::var("SystemRoot").expect("Windows directory");
+    let powershell = Path::new(&system_root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut cfg = config(
+        "desktop-startup",
+        &format!(
+            "\"{}\" -NoLogo -NoProfile -NonInteractive -Command \"Write-Output 'CHAR_PC_DESKTOP_READY'\"",
+            powershell.display()
+        ),
+    );
+    cfg["ui"] = json!({"disable": false});
+    cfg["processContainer"] =
+        json!({"capabilities": ["registryRead"], "ui": {"isolation": "desktop"}});
+    cfg["filesystem"] = json!({"readonlyPaths": [system_root]});
+    let result = run_platform_config_value("processcontainer desktop startup", &cfg, &[], None);
+    if skip_if_missing_prereq(&result) {
+        return;
+    }
+    assert_eq!(result.code, Some(0), "{}", result.combined_output());
+    assert!(
+        result.stdout.contains("CHAR_PC_DESKTOP_READY"),
+        "{}",
+        result.combined_output()
+    );
+}

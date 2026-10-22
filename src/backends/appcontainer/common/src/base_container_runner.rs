@@ -1454,8 +1454,13 @@ impl BaseContainerRunner {
 
         // STARTUPINFOW -- in pipe mode, pass parent handles via STARTF_USESTDHANDLES
         // so child output streams directly to the SDK caller.
+        // Service window stations prevent user32 initialization inside PSEC.
+        // Select the same desktop as the AppContainer launcher; the native
+        // security environment still enforces the requested UI restrictions.
+        let mut desktop_wide = string_util::to_wide("winsta0\\default");
         let si = STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            lpDesktop: PWSTR(desktop_wide.as_mut_ptr()),
             dwFlags: if pipe_mode {
                 STARTF_USESTDHANDLES
             } else {
